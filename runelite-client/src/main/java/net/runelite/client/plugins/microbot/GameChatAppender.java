@@ -68,9 +68,9 @@ public class GameChatAppender extends AppenderBase<ILoggingEvent> {
 
         final String formatted = layout.doLayout(event);
         // use invoke so we don't stall the calling thread
-        Microbot.getClientThread().invoke(() ->
-                Microbot.getClient().addChatMessage(ChatMessageType.ENGINE, "", formatted, "", false)
-        );
+        Microbot.getClientThread().invoke(() -> {
+            Microbot.getClient().addChatMessage(ChatMessageType.ENGINE, "", formatted, "", false);
+        });
     }
 
     /**
