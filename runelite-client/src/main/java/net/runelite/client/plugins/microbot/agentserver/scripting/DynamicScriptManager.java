@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.agentserver.scripting;
 
 import com.google.common.reflect.ClassPath;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.events.ExternalPluginsChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginInstantiationException;
@@ -45,6 +46,20 @@ public class DynamicScriptManager {
      * Compile source, load the plugin class, inject via Guice, and start it.
      */
     public synchronized DeployedScript deploy(String name, Path sourceDir) throws DeploymentException {
+        return deploy(name, sourceDir, true);
+    }
+
+    /**
+     * Compile source, load the plugin class, inject via Guice, register it, and
+     * optionally start it.
+     *
+     * @param autoStart when {@code true} the plugin is enabled and started
+     *                  immediately; when {@code false} it is only registered
+     *                  (so it appears in the plugin list, toggled off) and the
+     *                  user starts it manually. Enabling is left entirely to the
+     *                  user — deploy never persists an enabled=true config.
+     */
+    public synchronized DeployedScript deploy(String name, Path sourceDir, boolean autoStart) throws DeploymentException {
         if (deployments.containsKey(name)) {
             throw new DeploymentException("Deployment '" + name + "' already exists. Use reload to update.");
         }
@@ -77,16 +92,19 @@ public class DynamicScriptManager {
             throw new DeploymentException("Failed to create classloader: " + e.getMessage());
         }
 
-        // 3. Instantiate, inject, start
+        // 3. Instantiate, inject, register (and optionally start)
         try {
-            Plugin plugin = instantiateAndStart(pluginClass);
+            Plugin plugin = instantiate(pluginClass, autoStart);
             deployment.setPlugin(plugin);
         } catch (DeploymentException e) {
             closeQuietly(classLoader);
             throw e;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Catch Throwable, not just Exception: a plugin's static initializer
+            // can fail with an Error (e.g. ExceptionInInitializerError). If that
+            // escapes, the HTTP handler never responds and the caller hangs.
             closeQuietly(classLoader);
-            throw new DeploymentException("Failed to start plugin: " + e.getMessage());
+            throw new DeploymentException("Failed to load plugin: " + rootCauseMessage(e));
         }
 
         deployments.put(name, deployment);
@@ -103,9 +121,13 @@ public class DynamicScriptManager {
             throw new DeploymentException("No deployment named '" + name + "' exists.");
         }
         Path sourceDir = existing.getSourcePath();
+        // Preserve the running state across reload: if the user had it enabled,
+        // bring it back enabled; if it was registered-but-off, keep it off.
+        boolean wasActive = existing.getPlugin() != null
+                && Microbot.getPluginManager().isActive(existing.getPlugin());
         doUndeploy(existing);
         deployments.remove(name);
-        return deploy(name, sourceDir);
+        return deploy(name, sourceDir, wasActive);
     }
 
     public synchronized void undeploy(String name) throws DeploymentException {
@@ -144,6 +166,9 @@ public class DynamicScriptManager {
         if (deployment.getPlugin() != null) {
             stopPluginSafe(deployment.getPlugin());
             Microbot.getPluginManager().remove(deployment.getPlugin());
+            if (Microbot.getEventBus() != null) {
+                Microbot.getEventBus().post(new ExternalPluginsChanged());
+            }
         }
         closeQuietly(deployment.getClassLoader());
     }
@@ -174,7 +199,7 @@ public class DynamicScriptManager {
     }
 
     @SuppressWarnings("unchecked")
-    private Plugin instantiateAndStart(Class<?> clazz) throws PluginInstantiationException, DeploymentException {
+    private Plugin instantiate(Class<?> clazz, boolean autoStart) throws PluginInstantiationException, DeploymentException {
         Class<Plugin> pluginClass = (Class<Plugin>) clazz;
 
         PluginDescriptor desc = pluginClass.getAnnotation(PluginDescriptor.class);
@@ -213,33 +238,47 @@ public class DynamicScriptManager {
         Injector pluginInjector = parentInjector.createChildInjector(pluginModule);
         plugin.setInjector(pluginInjector);
 
-        // Register and start on EDT
+        // Register the plugin so it shows up in the plugin list. Starting it is
+        // a separate, opt-in step — activation is always the user's choice.
         PluginManager pm = Microbot.getPluginManager();
         pm.add(plugin);
 
-        AtomicBoolean success = new AtomicBoolean(false);
-        AtomicReference<Exception> error = new AtomicReference<>();
-        try {
-            SwingUtilities.invokeAndWait(() -> {
-                try {
-                    pm.setPluginEnabled(plugin, true);
-                    success.set(pm.startPlugin(plugin));
-                } catch (Exception e) {
-                    error.set(e);
-                }
-            });
-        } catch (Exception e) {
-            pm.remove(plugin);
-            throw new PluginInstantiationException("EDT dispatch failed: " + e.getMessage());
+        if (autoStart) {
+            AtomicBoolean success = new AtomicBoolean(false);
+            AtomicReference<Exception> error = new AtomicReference<>();
+            try {
+                SwingUtilities.invokeAndWait(() -> {
+                    try {
+                        pm.setPluginEnabled(plugin, true);
+                        success.set(pm.startPlugin(plugin));
+                    } catch (Exception e) {
+                        error.set(e);
+                    }
+                });
+            } catch (Exception e) {
+                pm.remove(plugin);
+                throw new PluginInstantiationException("EDT dispatch failed: " + e.getMessage());
+            }
+
+            if (error.get() != null) {
+                pm.remove(plugin);
+                throw new PluginInstantiationException(error.get());
+            }
+            if (!success.get()) {
+                pm.remove(plugin);
+                throw new PluginInstantiationException("startPlugin returned false for " + pluginClass.getSimpleName());
+            }
+        } else {
+            // Register only: persist disabled so the plugin list shows it toggled
+            // off and it never starts until the user enables it. Also clears any
+            // stale enabled=true left by a previous force-start.
+            pm.setPluginEnabled(plugin, false);
         }
 
-        if (error.get() != null) {
-            pm.remove(plugin);
-            throw new PluginInstantiationException(error.get());
-        }
-        if (!success.get()) {
-            pm.remove(plugin);
-            throw new PluginInstantiationException("startPlugin returned false for " + pluginClass.getSimpleName());
+        // Refresh the plugin list UI so the newly registered plugin appears
+        // (and is toggleable) whether or not it was auto-started.
+        if (Microbot.getEventBus() != null) {
+            Microbot.getEventBus().post(new ExternalPluginsChanged());
         }
 
         return plugin;
@@ -263,6 +302,17 @@ public class DynamicScriptManager {
 
     private Path getBuildDir(String name) {
         return Path.of(System.getProperty("user.home"), ".runelite", "dynamic-scripts", name, "classes");
+    }
+
+    /** Unwraps to the deepest cause and renders a useful message (wrappers like
+     * ExceptionInInitializerError carry a null message; the cause has the detail). */
+    private static String rootCauseMessage(Throwable t) {
+        Throwable root = t;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        String msg = root.getMessage();
+        return msg != null ? root.getClass().getSimpleName() + ": " + msg : root.toString();
     }
 
     private void closeQuietly(URLClassLoader cl) {

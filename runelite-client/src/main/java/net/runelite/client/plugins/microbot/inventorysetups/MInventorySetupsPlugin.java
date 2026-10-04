@@ -337,7 +337,10 @@ public class MInventorySetupsPlugin extends Plugin
 	public void shutDown()
 	{
 		resetBankSearch();
-		clientToolbar.removeNavigation(navButton);
+		if (clientToolbar != null && navButton != null)
+		{
+			clientToolbar.removeNavigation(navButton);
+		}
 	}
 
 	public String getSavedVersionString()
@@ -1356,15 +1359,20 @@ public class MInventorySetupsPlugin extends Plugin
 	{
 		// We only reset the bank search if the active tag is an inventory setup
 		// This stops it from closing an open bank tag tab or other plugins opening bank tags.
-		if (isInventorySetupTagOpen())
+		if (isInventorySetupTagOpen() && clientThread != null)
 		{
-			clientThread.invoke(() -> bankTagsService.closeBankTag());
+			clientThread.invoke(() -> {
+				if (bankTagsService != null)
+				{
+					bankTagsService.closeBankTag();
+				}
+			});
 		}
 	}
 
 	public boolean isInventorySetupTagOpen()
 	{
-		return bankTagsService.getActiveTag() != null && bankTagsService.getActiveTag().startsWith(LAYOUT_PREFIX_MARKER);
+		return bankTagsService != null && bankTagsService.getActiveTag() != null && bankTagsService.getActiveTag().startsWith(LAYOUT_PREFIX_MARKER);
 	}
 
 	@Subscribe(priority = -1) // Make sure this runs AFTER bank tags plugin.

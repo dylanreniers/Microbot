@@ -70,6 +70,11 @@ public abstract class Plugin implements Module
 		return null;
 	}
 
+	public final Module getPublicModuleOrNull()
+	{
+		return getPublicModule();
+	}
+
 	public void resetConfiguration()
 	{
 	}

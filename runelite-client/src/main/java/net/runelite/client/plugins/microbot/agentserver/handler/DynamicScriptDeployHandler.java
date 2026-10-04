@@ -109,9 +109,15 @@ public class DynamicScriptDeployHandler extends AgentHandler {
             return;
         }
 
+        // Optional: start the plugin immediately (default true for backwards
+        // compatibility). Pass false to only register it — activation is then a
+        // manual action in the plugin list.
+        boolean autoStart = getBoolean(body, "start", true);
+
         try {
-            DeployedScript deployment = manager.deploy(name, sourceDir);
-            sendJson(exchange, 200, deploymentResponse(deployment, "Deployed successfully"));
+            DeployedScript deployment = manager.deploy(name, sourceDir, autoStart);
+            sendJson(exchange, 200, deploymentResponse(deployment,
+                    autoStart ? "Deployed and started" : "Deployed (not started)"));
         } catch (DynamicScriptManager.DeploymentException e) {
             log.warn("Deploy '{}' failed: {}", name, e.getMessage());
             sendJson(exchange, 400, errorResponse(e.getMessage()));
@@ -196,6 +202,17 @@ public class DynamicScriptDeployHandler extends AgentHandler {
     private String getString(Map<String, Object> body, String key) {
         Object val = body.get(key);
         return val instanceof String ? (String) val : null;
+    }
+
+    private boolean getBoolean(Map<String, Object> body, String key, boolean defaultValue) {
+        Object val = body.get(key);
+        if (val instanceof Boolean) {
+            return (Boolean) val;
+        }
+        if (val instanceof String) {
+            return Boolean.parseBoolean((String) val);
+        }
+        return defaultValue;
     }
 
     private boolean isValidName(String name) {

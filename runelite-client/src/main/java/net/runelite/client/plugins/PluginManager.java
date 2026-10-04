@@ -135,6 +135,9 @@ public class PluginManager {
     public Config getPluginConfigProxy(Plugin plugin) {
         try {
             final Injector injector = plugin.getInjector();
+            if (injector == null) {
+                return null;
+            }
 
             for (Key<?> key : injector.getBindings().keySet()) {
                 Class<?> type = key.getTypeLiteral().getRawType();
@@ -244,6 +247,7 @@ public class PluginManager {
         List<Class<?>> plugins = classPath.getTopLevelClassesRecursive(PLUGIN_PACKAGE).stream()
                 .map(ClassInfo::load)
                 .filter(clazz -> !isMicrobotRelatedClass(clazz))
+                .filter(clazz -> !clazz.isAnnotationPresent(UnderDevelopment.class))
                 .collect(Collectors.toList());
 
         loadPlugins(plugins, (loaded, total) ->

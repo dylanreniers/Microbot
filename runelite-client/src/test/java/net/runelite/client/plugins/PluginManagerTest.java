@@ -181,6 +181,21 @@ public class PluginManagerTest
 		assertTrue(loaded.get(1) instanceof LoadOrderDependent);
 	}
 
+	@Test
+	public void testMicrobotPluginManagerLoadMInventorySetups() throws Exception
+	{
+		var pluginManager = RuneLite.getInjector().getInstance(PluginManager.class);
+		pluginManager.loadCoreRunelitePlugins();
+
+		var microbotPluginManager = RuneLite.getInjector().getInstance(net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManager.class);
+		var loaded = microbotPluginManager.loadPlugins(List.of(net.runelite.client.plugins.microbot.inventorysetups.MInventorySetupsPlugin.class), null);
+
+		assertEquals(1, loaded.size());
+		Plugin invSetups = loaded.get(0);
+		org.junit.Assert.assertNotNull(invSetups.getInjector());
+		org.junit.Assert.assertNotNull(pluginManager.getPluginConfigProxy(invSetups));
+	}
+
 	@PluginDescriptor(name = "Load order dependency")
 	public static class LoadOrderDependency extends Plugin
 	{

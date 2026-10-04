@@ -424,7 +424,8 @@ public class MicrobotPluginManager {
         return l;
     }
 
-    private List<Plugin> loadPlugins(List<Class<?>> plugins, BiConsumer<Integer, Integer> onPluginLoaded) throws PluginInstantiationException {
+    @VisibleForTesting
+    public List<Plugin> loadPlugins(List<Class<?>> plugins, BiConsumer<Integer, Integer> onPluginLoaded) throws PluginInstantiationException {
         MutableGraph<Class<? extends Plugin>> graph = GraphBuilder
                 .directed()
                 .build();
@@ -506,13 +507,17 @@ public class MicrobotPluginManager {
 
     private Plugin instantiate(Collection<Plugin> scannedPlugins, Class<Plugin> clazz) throws PluginInstantiationException {
         PluginDependency[] pluginDependencies = clazz.getAnnotationsByType(PluginDependency.class);
-        List<Plugin> deps = new ArrayList<>();
+        List<Module> modules = new ArrayList<>();
         for (PluginDependency pluginDependency : pluginDependencies) {
             Optional<Plugin> dependency = scannedPlugins.stream().filter(p -> p.getClass() == pluginDependency.value()).findFirst();
             if (!dependency.isPresent()) {
                 throw new PluginInstantiationException("Unmet dependency for " + clazz.getSimpleName() + ": " + pluginDependency.value().getSimpleName());
             }
-            deps.add(dependency.get());
+
+            var module = dependency.get().getPublicModuleOrNull();
+            if (module != null) {
+                modules.add(module);
+            }
         }
 
         Plugin plugin;
@@ -527,29 +532,14 @@ public class MicrobotPluginManager {
         try {
             Injector parent = Microbot.getInjector();
 
-            if (deps.size() > 1) {
-                List<com.google.inject.Module> modules = new ArrayList<>(deps.size());
-                for (Plugin p : deps) {
-                    com.google.inject.Module module = (Binder binder) ->
-                    {
-                        binder.bind((Class<Plugin>) p.getClass()).toInstance(p);
-                        binder.install(p);
-                    };
-                    modules.add(module);
-                }
-
-                parent = parent.createChildInjector(modules);
-            } else if (!deps.isEmpty()) {
-                parent = deps.get(0).getInjector();
-            }
-
             Module pluginModule = (Binder binder) ->
             {
                 binder.bind(clazz).toInstance(plugin);
                 binder.install(plugin);
             };
-            Injector pluginInjector = parent.createChildInjector(pluginModule);
-            System.out.println(pluginInjector.getClass().getSimpleName());
+            modules.add(pluginModule);
+
+            Injector pluginInjector = parent.createChildInjector(modules);
             plugin.setInjector(pluginInjector);
         } catch (com.google.common.util.concurrent.ExecutionError e) {
             // Guice/Guava wraps NoClassDefFoundError here
@@ -561,13 +551,17 @@ public class MicrobotPluginManager {
             }
 
             File jar = getPluginJarFile(plugin.getClass().getSimpleName());
-            if (jar != null) {
+            if (jar != null && jar.exists()) {
                 jar.delete();
             }
+            throw new PluginInstantiationException(e);
         } catch (Exception ex) {
-            log.error("Incompatible plugin found: " + clazz.getSimpleName());
+            log.error("Incompatible plugin found: " + clazz.getSimpleName(), ex);
             File jar = getPluginJarFile(plugin.getClass().getSimpleName());
-            jar.delete();
+            if (jar != null && jar.exists()) {
+                jar.delete();
+            }
+            throw new PluginInstantiationException(ex);
         }
 
         log.debug("Loaded plugin {}", clazz.getSimpleName());
@@ -629,6 +623,10 @@ public class MicrobotPluginManager {
 
                 try {
                     Class<?> clazz = classInfo.load();
+                    if (clazz.isAnnotationPresent(UnderDevelopment.class)) {
+                        log.debug("Skipping @UnderDevelopment plugin class: {}", clazz.getName());
+                        continue;
+                    }
                     if (isMicrobotRelatedPlugin(clazz)) {
                         microbotPlugins.add(clazz);
                         log.debug("Found Microbot plugin class: {}", clazz.getName());
